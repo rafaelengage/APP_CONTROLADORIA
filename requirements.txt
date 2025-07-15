@@ -1,8 +1,5 @@
-streamlit as st
-pandas as pd
-io
-datetime
-time
+streamlit
+pandas
+psycopg2-binary
 requests
-json
-re
+openpyxl
