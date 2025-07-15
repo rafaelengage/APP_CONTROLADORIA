@@ -68,35 +68,47 @@ def consultar_pedido_thorpe(token, url_base, pedido_raw, origem):
 def extrair_status_recente_thorpe_generico(dados_pedido_api, id_pedido_raw):
     if not dados_pedido_api: return {"pedido_raw_key": str(id_pedido_raw), "Status Thorpe": "---", "Data Status Thorpe": pd.NaT}
     eventos = []
-    status_atual = dados_pedido_api.get("statusAtual", "---")
-    for item in dados_pedido_api.get("historicoStatus", []):
-        if item.get("data"):
-            try: eventos.append(pd.to_datetime(item["data"]))
-            except: pass
-    for item in dados_pedido_api.get("informacoesRastreio", {}).get("rastreio", []):
-        if item.get("dataHora"):
-            try: eventos.append(pd.to_datetime(item["dataHora"]))
-            except: pass
-    if eventos:
-        eventos.sort(reverse=True)
-        return {"pedido_raw_key": str(id_pedido_raw), "Status Thorpe": status_atual, "Data Status Thorpe": eventos[0]}
-    return {"pedido_raw_key": str(id_pedido_raw), "Status Thorpe": status_atual, "Data Status Thorpe": pd.NaT}
+    status_atual = dados_pedido_api.get("statusAtual")
+    if not status_atual:
+        status_atual = "---"
 
-def buscar_dados_thorpe_combinado_api(lista_pedidos_raw: list, token_ex, token_es, placeholder):
-    if not lista_pedidos_raw: return pd.DataFrame()
-    total = len(lista_pedidos_raw)
+    for item in dados_pedido_api.get("historicoStatus", []):
+        if item.get("data") and item.get("status"):
+            try:
+                eventos.append({'date': pd.to_datetime(item["data"]), 'status': item["status"]})
+            except (ValueError, TypeError):
+                pass
+    for item in dados_pedido_api.get("informacoesRastreio", {}).get("rastreio", []):
+        if item.get("dataHora") and item.get("status"):
+            try:
+                eventos.append({'date': pd.to_datetime(item["dataHora"]), 'status': item["status"]})
+            except (ValueError, TypeError):
+                pass
+
+    if eventos:
+        eventos.sort(key=lambda x: x['date'], reverse=True)
+        latest_event = eventos[0]
+        return {
+            "pedido_raw_key": str(id_pedido_raw),
+            "Status Thorpe": latest_event.get('status', '---'),
+            "Data Status Thorpe": latest_event.get('date', pd.NaT)
+        }
+    
+    return {"pedido_raw_key": str(id_pedido_raw), "Status Thorpe": dados_pedido_api.get("statusAtual", "---"), "Data Status Thorpe": pd.NaT}
+
+def buscar_dados_thorpe_combinado_api(lista_pedidos_para_thorpe: list, token_ex, token_es, placeholder):
+    if not lista_pedidos_para_thorpe: return pd.DataFrame()
+    total = len(lista_pedidos_para_thorpe)
     all_api_data = []
     progress_bar = placeholder.progress(0, text=f"Consultando {total} pedidos na API Thorpe...")
-    for i, pedido_raw in enumerate(lista_pedidos_raw):
-        dados, origem = None, ""
+    for i, pedido_id in enumerate(lista_pedidos_para_thorpe):
+        dados = None
         if token_ex:
-            dados = consultar_pedido_thorpe(token_ex, API_PEDIDOS_BASE_URL_THORPE_EX, pedido_raw, "EX")
-            if dados: origem = "- EX"
+            dados = consultar_pedido_thorpe(token_ex, API_PEDIDOS_BASE_URL_THORPE_EX, pedido_id, "EX")
         if not dados and token_es:
-            dados = consultar_pedido_thorpe(token_es, API_PEDIDOS_BASE_URL_THORPE_ES, pedido_raw, "ES")
-            if dados: origem = "- ES"
-        info = extrair_status_recente_thorpe_generico(dados, pedido_raw)
-        info["Status Thorpe"] = f"{info['Status Thorpe']} {origem}".strip()
+            dados = consultar_pedido_thorpe(token_es, API_PEDIDOS_BASE_URL_THORPE_ES, pedido_id, "ES")
+        
+        info = extrair_status_recente_thorpe_generico(dados, pedido_id)
         all_api_data.append(info)
         time.sleep(0.05)
         progress_bar.progress((i + 1) / total, text=f"Consultando {total} pedidos na API Thorpe...")
@@ -105,7 +117,7 @@ def buscar_dados_thorpe_combinado_api(lista_pedidos_raw: list, token_ex, token_e
 
 def preparar_id_para_bd(pedido_id_excel):
     id_str = str(pedido_id_excel).replace('_CANC', '')
-    return id_str[:-2] if len(id_str) == 11 and id_str[-2:] in ['01', '02', '03'] else id_str
+    return id_str[:-2] if len(id_str) == 11 and id_str.isnumeric() else id_str
 
 def buscar_dados_api(url, lista_ids, placeholder, nome_api):
     if not lista_ids: return pd.DataFrame()
@@ -180,7 +192,7 @@ if uploaded_file:
     st.sidebar.subheader("2. Selecione a coluna dos pedidos:")
     coluna_selecionada = st.sidebar.selectbox("Selecione a coluna dos pedidos:", colunas, index=default_ix, label_visibility="collapsed")
 
-st.sidebar.subheader("3. Iniciar Processo")
+st.sidebar.subheader("3. Iniciar Processo.")
 process_button = st.sidebar.button("PROCESSAR CONSULTA", type="primary")
 
 if process_button and uploaded_file and coluna_selecionada:
@@ -192,9 +204,14 @@ if process_button and uploaded_file and coluna_selecionada:
     try:
         df_base = df_excel[[coluna_selecionada]].copy().rename(columns={coluna_selecionada: "ID Original Excel"})
         df_base.dropna(subset=["ID Original Excel"], inplace=True)
-        df_base["ID Original Excel"] = df_base["ID Original Excel"].astype(str).str.strip().str.upper()
+        def sanitize_id(pid):
+            pid_str = str(pid).strip()
+            if pid_str.endswith('.0'):
+                return pid_str[:-2]
+            return pid_str.upper()
+        df_base["ID Original Excel"] = df_base["ID Original Excel"].apply(sanitize_id)
         df_base.drop_duplicates(subset=["ID Original Excel"], inplace=True, keep='first')
-        df_base["ID_para_Consulta_API"] = df_base["ID Original Excel"].apply(preparar_id_para_bd).str.upper()
+        df_base["ID_para_Consulta_API"] = df_base["ID Original Excel"].apply(preparar_id_para_bd)
         
         st.session_state.total_pedidos_input = len(df_base)
         log_message('info', f"Arquivo Excel lido: {st.session_state.total_pedidos_input} pedidos únicos para consulta.")
@@ -204,10 +221,24 @@ if process_button and uploaded_file and coluna_selecionada:
             df_detalhado = buscar_dados_api(API_PEDIDO_DETALHADO_URL, ids_limpos, placeholder_detalhes, "Pedidos Detalhados")
             
             if not df_detalhado.empty:
+                map_norm_to_orig = pd.Series(df_base['ID Original Excel'].values, index=df_base['ID_para_Consulta_API']).to_dict()
+                df_detalhado['ID Original Excel'] = df_detalhado['pedido_normalizado'].map(map_norm_to_orig)
+
+                def decide_thorpe_id(row):
+                    original_id = str(row['ID Original Excel'])
+                    if len(original_id) == 11 and original_id.isnumeric():
+                        return original_id
+                    else:
+                        return str(row['pedido_raw'])
+                
+                df_detalhado['ID_para_Thorpe'] = df_detalhado.apply(decide_thorpe_id, axis=1)
+                
+                lista_para_thorpe = df_detalhado['ID_para_Thorpe'].unique().tolist()
                 token_ex, token_es = obter_token_thorpe_ex_cached(), obter_token_thorpe_es_cached()
-                df_thorpe = buscar_dados_thorpe_combinado_api(df_detalhado['pedido_raw'].unique().tolist(), token_ex, token_es, placeholder_thorpe)
+                df_thorpe = buscar_dados_thorpe_combinado_api(lista_para_thorpe, token_ex, token_es, placeholder_thorpe)
+
                 if not df_thorpe.empty:
-                    df_detalhado = pd.merge(df_detalhado, df_thorpe, left_on='pedido_raw', right_on='pedido_raw_key', how='left').drop(columns=['pedido_raw_key'])
+                    df_detalhado = pd.merge(df_detalhado, df_thorpe, left_on='ID_para_Thorpe', right_on='pedido_raw_key', how='left').drop(columns=['pedido_raw_key', 'ID_para_Thorpe'])
                 
                 df_crm = buscar_dados_api(API_CRM_URL, ids_limpos, placeholder_crm, "CRM")
                 
@@ -264,32 +295,33 @@ if st.session_state.dados_carregados:
         ('Pedidos em Tratativa', ids_caso6), ('Pedidos sem Tratativa', ids_caso1)
     ]
     
-    for pid in df_display_raw['pedido_normalizado'].unique():
+    all_pids = df_display_raw['pedido_normalizado'].unique()
+    for pid in all_pids:
         for name, id_list in priority_order:
             if pid in id_list:
                 final_audit_map[pid] = name
                 break
         if pid not in final_audit_map:
-            final_audit_map[pid] = 'OK'
+            final_audit_map[pid] = 'Outros Casos'
 
     counts = pd.Series(list(final_audit_map.values())).value_counts()
 
     # --- Interface ---
-    st.markdown("<h2 style='text-align: center;'>Visão Geral dos Pedidos</h2>", unsafe_allow_html=True)
+    total_pedidos = st.session_state.total_pedidos_input
+    st.markdown(f"<h2 style='text-align: center;'>Visão Geral de {total_pedidos} Pedidos Computados</h2>", unsafe_allow_html=True)
     
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric(label="Total Pedidos no Arquivo", value=st.session_state.total_pedidos_input)
-    col2.metric(label="Pedidos sem Tratativa", value=counts.get('Pedidos sem Tratativa', 0))
-    col3.metric(label="Cancelamento Pendente", value=counts.get('Pedidos com Cancelamento Pendente', 0))
-    col4.metric(label="Pedidos Bloqueados sem Faturamento", value=counts.get('Pedidos Bloqueados sem Faturamento', 0))
+    col1.metric(label="Pedidos sem Tratativa", value=counts.get('Pedidos sem Tratativa', 0))
+    col2.metric(label="Cancelamento Pendente", value=counts.get('Pedidos com Cancelamento Pendente', 0))
+    col3.metric(label="Pedidos Bloqueados sem Faturamento", value=counts.get('Pedidos Bloqueados sem Faturamento', 0))
+    col4.metric(label="Pedidos Devolvidos", value=counts.get('Pedidos Devolvidos', 0))
     
     col5, col6, col7, col8 = st.columns(4) 
-    col5.metric(label="Pedidos Devolvidos", value=counts.get('Pedidos Devolvidos', 0))
-    col6.metric(label="Pedidos Finalizados", value=counts.get('Pedidos Finalizados', 0))
-    col7.metric(label="Pedidos em Tratativa", value=counts.get('Pedidos em Tratativa', 0))
+    col5.metric(label="Pedidos Finalizados", value=counts.get('Pedidos Finalizados', 0))
+    col6.metric(label="Pedidos em Tratativa", value=counts.get('Pedidos em Tratativa', 0))
+    col7.metric(label="Outros Casos", value=counts.get('Outros Casos', 0))
 
     with col8:
-        total_pedidos = st.session_state.total_pedidos_input
         sem_tratativa_count = counts.get('Pedidos sem Tratativa', 0)
         if total_pedidos > 0:
             indicador_controle = (total_pedidos - sem_tratativa_count) / total_pedidos
@@ -299,13 +331,11 @@ if st.session_state.dados_carregados:
 
     st.markdown("---")
     st.subheader("Casos para Auditoria")
-    # MUDANÇA: 'Nenhum' -> 'Todos'
-    opcoes_auditoria = ['Todos', 'Pedidos sem Tratativa', 'Pedidos com Cancelamento Pendente', 'Pedidos Bloqueados sem Faturamento', 'Pedidos Devolvidos', 'Pedidos Finalizados', 'Pedidos em Tratativa']
+    opcoes_auditoria = ['Todos'] + [name for name, _ in priority_order] + ['Outros Casos']
     filtro_auditoria = st.selectbox("Selecione um caso de auditoria:", options=opcoes_auditoria, label_visibility="collapsed")
 
     st.subheader("Filtros Gerais")
     fcol1, fcol2, fcol3 = st.columns(3)
-    # MUDANÇA: 'Qualquer' -> 'Todos' e ajuste nos rótulos
     with fcol1: filtro_pedido = st.text_input("Número do Pedido:")
     with fcol2: filtro_canal = st.selectbox("Canal de Venda:", options=['Todos'] + sorted(df_display_raw['canal_venda'].dropna().unique().tolist()))
     with fcol3: filtro_id_empresa = st.selectbox("ID Empresa:", options=['Todos'] + sorted(df_display_raw['id_empresa'].dropna().unique().tolist()))
@@ -315,7 +345,6 @@ if st.session_state.dados_carregados:
     with fcol5: filtro_motivo_bloqueio = st.selectbox("Motivo Bloqueio Pedido:", options=['Todos'] + sorted(df_display_raw['motivo_bloqueio'].dropna().unique().tolist()))
     with fcol6: filtro_transportadora = st.selectbox("Transportadora:", options=['Todos'] + sorted(df_display_raw['transportadora'].dropna().unique().tolist()))
 
-    # Aplicar filtros
     df_filtrado = df_display_raw.copy()
     if filtro_auditoria != 'Todos':
         pids_filtrados = [pid for pid, cat in final_audit_map.items() if cat == filtro_auditoria]
@@ -332,7 +361,11 @@ if st.session_state.dados_carregados:
     
     st.subheader("Análise Detalhada por Pedido")
     if not df_filtrado.empty:
-        tabela_resumo = df_filtrado.groupby('pedido_normalizado').agg(canal_venda=('canal_venda', 'max'),data_pedido=('data_pedido', 'max'),valor_liquido=('valor_normalizado', 'sum')).reset_index()
+        tabela_resumo = df_filtrado.groupby('pedido_normalizado').agg(
+            canal_venda=('canal_venda', 'max'), data_pedido=('data_pedido', 'max'),
+            valor_liquido=('valor_normalizado', 'sum')
+        ).reset_index()
+
         for _, row in tabela_resumo.iterrows():
             pedido_norm, valor_formatado = row['pedido_normalizado'], f"R$ {row['valor_liquido']:,.2f}"
             data_formatada = pd.to_datetime(row['data_pedido']).strftime('%d/%m/%Y') if pd.notna(row['data_pedido']) else 'N/A'
@@ -351,9 +384,14 @@ if st.session_state.dados_carregados:
                 ordem_final = ['validacao_pedido', 'canal_venda', 'filial', 'id_empresa', 'data_pedido','Data/Hora Emissão', 'valor_normalizado', 'uf_dest', 'transportadora','motivo_bloqueio', 'us_cadastro', 'tipo_nfe', 'nfe_cstat', 'data_expedicao','bloqueada', 'Status Thorpe', 'Data Status Thorpe']
                 ordem_existente = [col for col in ordem_final if col in detalhes_pedido.columns]
                 detalhes_display = detalhes_pedido[ordem_existente].fillna('---')
-                for col in ['data_pedido', 'data_expedicao', 'Data Status Thorpe']:
-                     if col in detalhes_display.columns:
-                        detalhes_display[col] = pd.to_datetime(detalhes_display[col], errors='coerce').dt.strftime('%d/%m/%Y')
+                
+                # MUDANÇA: Formatar a data da Thorpe para incluir horas
+                for col_data in ['data_pedido', 'data_expedicao']:
+                     if col_data in detalhes_display.columns:
+                        detalhes_display[col_data] = pd.to_datetime(detalhes_display[col_data], errors='coerce').dt.strftime('%d/%m/%Y')
+                if 'Data Status Thorpe' in detalhes_display.columns:
+                    detalhes_display['Data Status Thorpe'] = pd.to_datetime(detalhes_display['Data Status Thorpe'], errors='coerce').dt.strftime('%d/%m/%Y %H:%M:%S')
+                
                 st.dataframe(detalhes_display, use_container_width=True, hide_index=True)
 
                 st.markdown("<h6>Andamentos no CRM</h6>", unsafe_allow_html=True)
@@ -362,7 +400,7 @@ if st.session_state.dados_carregados:
                     detalhes_crm['datahora_andamento'] = pd.to_datetime(detalhes_crm['datahora_andamento'], errors='coerce').dt.strftime('%d/%m/%Y %H:%M:%S')
                     st.dataframe(detalhes_crm.sort_values(by='datahora_andamento', ascending=False), use_container_width=True, hide_index=True)
                 else:
-                    st.text("Nenhum andamento encontrado para este pedido.")
+                    st.text("Nenhum andamento encontrado no CRM para este pedido.")
     else:
         st.info("Nenhum pedido corresponde aos filtros selecionados.")
 
@@ -377,10 +415,10 @@ if st.session_state.dados_carregados:
         with colE1:
             resumo_export = df_export_base.groupby('pedido_normalizado').agg(canal_venda=('canal_venda', 'max'),data_pedido=('data_pedido', 'max'),valor_liquido=('valor_normalizado', 'sum')).reset_index()
             excel_resumido = gerar_excel_resumido(resumo_export, final_audit_map)
-            st.download_button(label="📥 Exportar Versão Resumida", data=excel_resumido, file_name=f"resumo_pedidos_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+            st.download_button(label="📥 Exportar Resumo", data=excel_resumido, file_name=f"resumo_pedidos_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
         with colE2:
             excel_detalhado = gerar_excel_detalhado(df_export_base, df_crm_raw, final_audit_map)
-            st.download_button(label="📥 Exportar Versão Detalhada", data=excel_detalhado, file_name=f"detalhes_pedidos_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+            st.download_button(label="📥 Exportar Detalhes", data=excel_detalhado, file_name=f"detalhes_pedidos_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
     else:
         st.info("Nenhum dado para exportar com base no filtro de auditoria selecionado.")
 
