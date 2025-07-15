@@ -1,8 +1,8 @@
-import streamlit as st
-import pandas as pd
-import io
-from datetime import datetime
-import time
-import requests
-import json
-import re
+streamlit
+pandas
+io
+datetime
+time
+requests
+json
+re
