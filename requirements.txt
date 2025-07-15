@@ -1,5 +1,5 @@
-streamlit
-pandas
+streamlit as st
+pandas as pd
 io
 datetime
 time
