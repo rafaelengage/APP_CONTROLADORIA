@@ -8,7 +8,7 @@ import json
 import re
 
 # Configuração da página
-st.set_page_config(page_title="Consulta de Pedidos", page_icon="🔍", layout="wide")
+st.set_page_config(page_title="Consulta - Pedidos Cancelados", page_icon="🔍", layout="wide")
 
 # --- Configurações de API ---
 TOKEN_URL_THORPE_EX = 'https://apiextrema.thorpe.com.br/v2/token'
@@ -146,7 +146,7 @@ def gerar_excel_detalhado(df_consolidado, df_crm, audit_map):
     return output.getvalue()
 
 # --- Interface e Lógica Principal ---
-st.title("Consulta Massiva de Pedidos - Controladoria")
+st.title("Consulta Massiva de Pedidos Cancelados - Controladoria")
 
 st.sidebar.header("Configurações da Consulta")
 st.sidebar.subheader("1. Escolha seu arquivo Excel:")
