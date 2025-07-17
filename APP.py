@@ -8,7 +8,7 @@ import json
 import re
 
 # Configuração da página
-st.set_page_config(page_title="Consulta - Pedidos Cancelados", page_icon="🔍", layout="wide")
+st.set_page_config(page_title="Consulta de Pedidos", page_icon="🔍", layout="wide")
 
 # --- Configurações de API ---
 TOKEN_URL_THORPE_EX = 'https://apiextrema.thorpe.com.br/v2/token'
@@ -87,10 +87,11 @@ def buscar_dados_thorpe_combinado_api(lista_pedidos_para_thorpe: list, token_ex,
     total, all_api_data = len(lista_pedidos_para_thorpe), []
     progress_bar = placeholder.progress(0, text=f"Consultando {total} pedidos na API Thorpe...")
     for i, pedido_id in enumerate(lista_pedidos_para_thorpe):
-        dados = None
+        dados, origem = None, ""
         if token_ex: dados = consultar_pedido_thorpe(token_ex, API_PEDIDOS_BASE_URL_THORPE_EX, pedido_id, "EX")
         if not dados and token_es: dados = consultar_pedido_thorpe(token_es, API_PEDIDOS_BASE_URL_THORPE_ES, pedido_id, "ES")
-        all_api_data.append(extrair_status_recente_thorpe_generico(dados, pedido_id))
+        info = extrair_status_recente_thorpe_generico(dados, pedido_id)
+        all_api_data.append(info)
         time.sleep(0.05)
         progress_bar.progress((i + 1) / total, text=f"Consultando {total} pedidos na API Thorpe...")
     progress_bar.progress(1.0, text="Consulta Thorpe concluída!")
@@ -146,7 +147,7 @@ def gerar_excel_detalhado(df_consolidado, df_crm, audit_map):
     return output.getvalue()
 
 # --- Interface e Lógica Principal ---
-st.title("Consulta Massiva de Pedidos Cancelados - Controladoria")
+st.title("Consulta Massiva de Pedidos - Controladoria")
 
 st.sidebar.header("Configurações da Consulta")
 st.sidebar.subheader("1. Escolha seu arquivo Excel:")
@@ -213,7 +214,7 @@ if process_button and uploaded_file and coluna_selecionada:
                 st.session_state.df_consolidado, st.session_state.df_crm = df_detalhado, df_crm
                 st.session_state.dados_carregados = True
             else:
-                log_message('error', "A consulta inicial não retornou todos os resultados. Verifique o filtro 'Pedidos não Encontrados'.")
+                log_message('error', "A consulta inicial não retornou todos os resultados. Verifique o filtro 'Pedidos não Encontrados na Base do Sysemp'.")
     except Exception as e:
         log_message('error', f"Ocorreu um erro geral no processamento: {e}"); import traceback; log_message('error', traceback.format_exc())
 
@@ -221,43 +222,53 @@ if st.session_state.dados_carregados or st.session_state.ids_nao_encontrados:
     df_display_raw = st.session_state.get('df_consolidado', pd.DataFrame())
     df_crm_raw = st.session_state.get('df_crm', pd.DataFrame())
 
+    # --- Lógica de pré-cálculo para os filtros de auditoria ---
+    # MUDANÇA: Definir a prioridade e as listas de ID fora da condição para garantir que existam
+    ids_caso1, ids_caso2, ids_caso3, ids_caso4, ids_caso5, ids_caso6 = [], [], [], [], [], []
+    priority_order = [
+        ('Pedidos com Cancelamento Pendente', ids_caso2), ('Pedidos Bloqueados sem Faturamento', ids_caso3),
+        ('Pedidos Devolvidos', ids_caso4), ('Pedidos Finalizados', ids_caso5),
+        ('Pedidos em Tratativa', ids_caso6), ('Pedidos sem Tratativa', ids_caso1)
+    ]
+    
     final_audit_map = {}
     if not df_display_raw.empty:
         df_display_raw['valor_normalizado'] = pd.to_numeric(df_display_raw['valor_normalizado'], errors='coerce').fillna(0)
         resumo_valores = df_display_raw.groupby('pedido_normalizado')['valor_normalizado'].sum()
         validacoes_por_pedido = df_display_raw.groupby('pedido_normalizado')['validacao_pedido'].unique().apply(set)
         pedidos_com_nota = validacoes_por_pedido[validacoes_por_pedido != {'Pedido'}].index
-        ids_caso1, ids_caso2, ids_caso3, ids_caso4, ids_caso5, ids_caso6 = [], [], [], [], [], []
+        
         if not df_crm_raw.empty:
             df_crm_raw['datahora_andamento'] = pd.to_datetime(df_crm_raw['datahora_andamento'], errors='coerce')
             pedidos_positivos = resumo_valores[resumo_valores > 0].index
             pedidos_com_tratativa_real = df_crm_raw[df_crm_raw['andamento_descricao'] != 'EM EXPEDIÇÃO']['pedido_normalizado'].unique()
-            ids_caso1 = [pid for pid in pedidos_positivos if pid not in pedidos_com_tratativa_real]
+            ids_caso1[:] = [pid for pid in pedidos_positivos if pid not in pedidos_com_tratativa_real] # Modifica a lista in-place
+
             df_crm_recente_por_raw = df_crm_raw.sort_values('datahora_andamento', ascending=False).drop_duplicates('pedido_raw', keep='first')
             regex_cancelamento = re.compile(r'^LIB.*CANC', re.IGNORECASE)
             cancelamentos_pendentes_raw = df_crm_recente_por_raw[df_crm_recente_por_raw['andamento_obs'].str.contains(regex_cancelamento, na=False, regex=True)]
-            ids_caso2 = cancelamentos_pendentes_raw['pedido_normalizado'].unique()
+            ids_caso2[:] = cancelamentos_pendentes_raw['pedido_normalizado'].unique()
+            
             df_crm_recente_por_norm = df_crm_raw.sort_values('datahora_andamento', ascending=False).drop_duplicates('pedido_normalizado', keep='first')
             pedidos_finalizados_crm = df_crm_recente_por_norm[df_crm_recente_por_norm['andamento_descricao'].str.startswith('FINAL', na=False)]['pedido_normalizado'].unique()
-            ids_caso5 = list(set(pedidos_com_nota) & set(pedidos_finalizados_crm))
+            ids_caso5[:] = list(set(pedidos_com_nota) & set(pedidos_finalizados_crm))
+            
             pedidos_em_andamento = list(set(pedidos_com_tratativa_real) - set(pedidos_finalizados_crm))
-            ids_caso6 = list(set(pedidos_com_nota) & set(pedidos_em_andamento))
+            ids_caso6[:] = list(set(pedidos_com_nota) & set(pedidos_em_andamento))
+
         pedidos_so_com_pedido = validacoes_por_pedido[validacoes_por_pedido == {'Pedido'}].index
         pedidos_bloqueados_T = df_display_raw[df_display_raw['bloqueada'] == 'T']['pedido_normalizado'].unique()
-        ids_caso3 = list(set(pedidos_so_com_pedido) & set(pedidos_bloqueados_T))
-        pedidos_valor_zero = resumo_valores[(resumo_valores > -1) & (resumo_valores < 1)].index
-        ids_caso4 = list(set(pedidos_com_nota) & set(pedidos_valor_zero))
+        ids_caso3[:] = list(set(pedidos_so_com_pedido) & set(pedidos_bloqueados_T))
         
-        priority_order = [
-            ('Pedidos com Cancelamento Pendente', ids_caso2), ('Pedidos Bloqueados sem Faturamento', ids_caso3),
-            ('Pedidos Devolvidos', ids_caso4), ('Pedidos Finalizados', ids_caso5),
-            ('Pedidos em Tratativa', ids_caso6), ('Pedidos sem Tratativa', ids_caso1)
-        ]
+        pedidos_valor_zero = resumo_valores[(resumo_valores > -1) & (resumo_valores < 1)].index
+        ids_caso4[:] = list(set(pedidos_com_nota) & set(pedidos_valor_zero))
+        
         for pid in df_display_raw['pedido_normalizado'].unique():
             for name, id_list in priority_order:
                 if pid in id_list:
                     final_audit_map[pid] = name; break
             if pid not in final_audit_map: final_audit_map[pid] = 'OK'
+    
     counts = pd.Series(list(final_audit_map.values())).value_counts()
 
     # --- Interface ---
@@ -281,7 +292,6 @@ if st.session_state.dados_carregados or st.session_state.ids_nao_encontrados:
     opcoes_auditoria = ['Todos'] + [name for name, _ in priority_order] + ['Pedidos não Encontrados na Base do Sysemp']
     filtro_auditoria = st.selectbox("Selecione um caso de auditoria:", options=opcoes_auditoria, label_visibility="collapsed")
 
-    # --- MUDANÇA: Lógica de exibição condicional ---
     if filtro_auditoria == 'Pedidos não Encontrados na Base do Sysemp':
         st.markdown("---")
         st.subheader("Lista de Pedidos Não Encontrados na Base do Sysemp")
