@@ -196,15 +196,31 @@ if process_button and uploaded_file and coluna_selecionada:
             st.session_state.ids_nao_encontrados = list(set(ids_limpos) - set(df_detalhado['pedido_normalizado'].unique()))
             
             if not df_detalhado.empty:
-                # MUDANÇA: Lógica de consulta à Thorpe corrigida
-                token_ex, token_es = obter_token_thorpe_ex_cached(), obter_token_thorpe_es_cached()
-                # 1. Consultar a Thorpe usando a lista de pedido_raw únicos
-                lista_para_thorpe = df_detalhado['pedido_raw'].unique().tolist()
-                df_thorpe = buscar_dados_thorpe_combinado_api(lista_para_thorpe, token_ex, token_es, placeholder_thorpe)
+                # --- MUDANÇA: LÓGICA CORRIGIDA PARA CONSULTA THORPE ---
+                # 1. Mapear o ID Original do Excel para cada linha de detalhe
+                map_norm_to_orig = pd.Series(df_base['ID Original Excel'].values, index=df_base['ID_para_Consulta_API']).to_dict()
+                df_detalhado['ID Original Excel'] = df_detalhado['pedido_normalizado'].map(map_norm_to_orig)
+
+                # 2. Criar uma coluna temporária que decide qual ID usar para a Thorpe
+                def decide_thorpe_id(row):
+                    original_id = str(row['ID Original Excel'])
+                    if len(original_id) == 11 and original_id.isnumeric():
+                        return original_id  # Usa o ID original de 11 dígitos
+                    return str(row['pedido_raw']) # Usa o pedido_raw para todos os outros casos
                 
-                # 2. Unir os resultados de volta usando pedido_raw como chave
+                df_detalhado['ID_para_Thorpe'] = df_detalhado.apply(decide_thorpe_id, axis=1)
+                
+                # 3. Consultar a Thorpe com a lista de IDs corretos
+                lista_para_thorpe = df_detalhado['ID_para_Thorpe'].unique().tolist()
+                token_ex, token_es = obter_token_thorpe_ex_cached(), obter_token_thorpe_es_cached()
+                df_thorpe = buscar_dados_thorpe_combinado_api(lista_para_thorpe, token_ex, token_es, placeholder_thorpe)
+
+                # 4. Unir os resultados da Thorpe de volta usando a chave correta
                 if not df_thorpe.empty:
-                    df_detalhado = pd.merge(df_detalhado, df_thorpe, left_on='pedido_raw', right_on='pedido_raw_key', how='left').drop(columns=['pedido_raw_key'])
+                    # O merge agora é entre a chave temporária e a chave retornada pela API
+                    df_detalhado = pd.merge(df_detalhado, df_thorpe, left_on='ID_para_Thorpe', right_on='pedido_raw_key', how='left')
+                    # Remove as colunas de ajuda que não são mais necessárias
+                    df_detalhado.drop(columns=['pedido_raw_key', 'ID_para_Thorpe'], inplace=True)
                 
                 df_crm = buscar_dados_api(API_CRM_URL, ids_limpos, placeholder_crm, "CRM")
                 
@@ -264,6 +280,7 @@ if st.session_state.dados_carregados or st.session_state.ids_nao_encontrados:
     col2.metric(label="Cancelamento Pendente", value=counts.get('Pedidos com Cancelamento Pendente', 0))
     col3.metric(label="Pedidos Bloqueados sem Faturamento", value=counts.get('Pedidos Bloqueados sem Faturamento', 0))
     col4.metric(label="Pedidos Devolvidos", value=counts.get('Pedidos Devolvidos', 0))
+    
     col5, col6, col7, col8 = st.columns(4) 
     col5.metric(label="Pedidos Finalizados", value=counts.get('Pedidos Finalizados', 0))
     col6.metric(label="Pedidos em Tratativa", value=counts.get('Pedidos em Tratativa', 0))
@@ -325,7 +342,7 @@ if st.session_state.dados_carregados or st.session_state.ids_nao_encontrados:
                         detalhes_pedido['Data/Hora Emissão'] = data_str.fillna('') + ' ' + hora_str.fillna('')
                         detalhes_pedido['Data/Hora Emissão'] = detalhes_pedido['Data/Hora Emissão'].str.strip().replace('', '---')
                     
-                    # MUDANÇA: Adicionando e reordenando colunas na tabela de detalhes
+                    # MUDANÇA: Adicionando pedido_raw na ordem de exibição
                     ordem_final = ['validacao_pedido', 'canal_venda', 'pedido_raw', 'filial', 'id_empresa', 'data_pedido','Data/Hora Emissão', 'valor_normalizado', 'uf_dest', 'transportadora','motivo_bloqueio', 'us_cadastro', 'tipo_nfe', 'nfe_cstat', 'data_expedicao','bloqueada', 'Status Thorpe', 'Data Status Thorpe']
                     detalhes_display = detalhes_pedido[[col for col in ordem_final if col in detalhes_pedido.columns]].fillna('---')
                     
@@ -333,7 +350,7 @@ if st.session_state.dados_carregados or st.session_state.ids_nao_encontrados:
                          if col in detalhes_display.columns: detalhes_display[col] = pd.to_datetime(detalhes_display[col], errors='coerce').dt.strftime('%d/%m/%Y')
                     if 'Data Status Thorpe' in detalhes_display.columns: detalhes_display['Data Status Thorpe'] = pd.to_datetime(detalhes_display['Data Status Thorpe'], errors='coerce').dt.strftime('%d/%m/%Y %H:%M:%S')
                     st.dataframe(detalhes_display, use_container_width=True, hide_index=True)
-
+                    
                     st.markdown("<h6>Andamentos no CRM</h6>", unsafe_allow_html=True)
                     detalhes_crm = df_crm_raw[df_crm_raw['pedido_normalizado'] == pedido_norm].copy().fillna('---')
                     if not detalhes_crm.empty:
