@@ -86,16 +86,26 @@ def extrair_status_recente_thorpe_generico(dados_pedido_api, id_pedido_raw):
 def buscar_dados_thorpe_combinado_api(lista_pedidos_para_thorpe: list, token_ex, token_es, placeholder):
     if not lista_pedidos_para_thorpe: return pd.DataFrame()
     total, all_api_data = len(lista_pedidos_para_thorpe), []
-    progress_bar = placeholder.progress(0, text=f"Consultando {total} pedidos na API Thorpe...")
+    
+    tempo_estimado_thorpe = int(total * 0.5)
+    
+    progress_bar = placeholder.progress(0, text=f"Consultando API Thorpe...")
+    
     for i, pedido_id in enumerate(lista_pedidos_para_thorpe):
+        # MUDANÇA: Lógica do tempo restante
+        tempo_passado = int(i * 0.5)
+        tempo_restante = tempo_estimado_thorpe - tempo_passado
+        min_rest, seg_rest = divmod(tempo_restante, 60)
+        texto_tempo = f"(Tempo restante: {min_rest}m {seg_rest}s)"
+
         dados = None
         if token_ex: dados = consultar_pedido_thorpe(token_ex, API_PEDIDOS_BASE_URL_THORPE_EX, pedido_id, "EX")
         if not dados and token_es: dados = consultar_pedido_thorpe(token_es, API_PEDIDOS_BASE_URL_THORPE_ES, pedido_id, "ES")
-        info = extrair_status_recente_thorpe_generico(dados, pedido_id)
-        all_api_data.append(info)
-        time.sleep(0.05)
-        progress_bar.progress((i + 1) / total, text=f"Consultando {total} pedidos na API Thorpe... ({i+1}/{total})")
-    progress_bar.progress(1.0, text="Consulta Thorpe concluída!")
+        all_api_data.append(extrair_status_recente_thorpe_generico(dados, pedido_id))
+        
+        progress_bar.progress((i + 1) / total, text=f"Consulta Detalhada do Thorpe em... {texto_tempo}")
+
+    progress_bar.progress(1.0, text="Consulta Detalhada do Thorpe Concluída!")
     return pd.DataFrame(all_api_data)
 
 def preparar_id_para_bd(pedido_id_excel):
@@ -197,7 +207,8 @@ if process_button and uploaded_file and coluna_selecionada:
             placeholder_paralelo = st.empty()
             placeholder_thorpe = st.empty()
 
-            progress_bar = placeholder_paralelo.progress(0, text="Iniciando consultas paralelas (Detalhes e CRM)...")
+            # MUDANÇA: Lógica de barra de progresso com tempo restante
+            progress_bar = placeholder_paralelo.progress(0, text="Iniciando Consulta Detalhada dos Pedidos...")
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future_detalhado = executor.submit(buscar_dados_api, API_PEDIDO_DETALHADO_URL, ids_limpos, "Pedidos Detalhados")
                 future_crm = executor.submit(buscar_dados_api, API_CRM_URL, ids_limpos, "CRM")
@@ -206,14 +217,19 @@ if process_button and uploaded_file and coluna_selecionada:
                 for i in range(tempo_paralelo_estimado):
                     if future_detalhado.done() and future_crm.done():
                         break
-                    progress = min((i + 1) / tempo_paralelo_estimado, 0.99)
-                    progress_bar.progress(progress, text=f"Consultas em paralelo... {int(progress * 100)}% estimado")
+                    
+                    tempo_restante = tempo_paralelo_estimado - i
+                    min_rest, seg_rest = divmod(tempo_restante, 60)
+                    texto_tempo = f"(Tempo restante: {min_rest}m {seg_rest}s)"
+                    
+                    progress = (i + 1) / tempo_paralelo_estimado
+                    progress_bar.progress(progress, text=f"Consulta Detalhada dos Pedidos em... {texto_tempo}")
                     time.sleep(1)
                 
                 df_detalhado = future_detalhado.result()
                 df_crm = future_crm.result()
             
-            progress_bar.progress(1.0, text="Consultas paralelas concluídas!")
+            progress_bar.progress(1.0, text="Consulta Detalhada dos Pedidos Concluída!")
 
             st.session_state.ids_nao_encontrados = list(set(ids_limpos) - set(df_detalhado['pedido_normalizado'].unique()))
             
