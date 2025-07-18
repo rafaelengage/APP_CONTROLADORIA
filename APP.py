@@ -157,7 +157,7 @@ def gerar_excel_detalhado(df_consolidado, df_crm, audit_map):
 
 
 # --- Interface e Lógica Principal ---
-st.title("Consulta Massiva de Pedidos - Controladoria")
+st.title("Consulta Massiva de Pedidos Cancelados - Controladoria")
 # ... (código da barra lateral inalterado) ...
 st.sidebar.header("Configurações da Consulta")
 st.sidebar.subheader("1. Escolha seu arquivo Excel:")
