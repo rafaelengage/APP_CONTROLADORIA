@@ -103,7 +103,7 @@ def buscar_dados_thorpe_combinado_api(lista_pedidos_para_thorpe: list, token_ex,
         if not dados and token_es: dados = consultar_pedido_thorpe(token_es, API_PEDIDOS_BASE_URL_THORPE_ES, pedido_id, "ES")
         all_api_data.append(extrair_status_recente_thorpe_generico(dados, pedido_id))
         
-        progress_bar.progress((i + 1) / total, text=f"Consulta Detalhada do Thorpe em... {texto_tempo}")
+        progress_bar.progress((i + 1) / total, text=f"Consulta Detalhada do Thorpe... {texto_tempo}")
 
     progress_bar.progress(1.0, text="Consulta Detalhada do Thorpe Concluída!")
     return pd.DataFrame(all_api_data)
@@ -223,7 +223,7 @@ if process_button and uploaded_file and coluna_selecionada:
                     texto_tempo = f"(Tempo restante: {min_rest}m {seg_rest}s)"
                     
                     progress = (i + 1) / tempo_paralelo_estimado
-                    progress_bar.progress(progress, text=f"Consulta Detalhada dos Pedidos em... {texto_tempo}")
+                    progress_bar.progress(progress, text=f"Consulta Detalhada dos Pedidos... {texto_tempo}")
                     time.sleep(1)
                 
                 df_detalhado = future_detalhado.result()
