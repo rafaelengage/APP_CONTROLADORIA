@@ -85,50 +85,57 @@ def extrair_status_recente_thorpe_generico(dados_pedido_api, id_pedido_raw):
 
 def buscar_dados_thorpe_combinado_api(lista_pedidos_para_thorpe: list, token_ex, token_es, placeholder):
     if not lista_pedidos_para_thorpe: return pd.DataFrame()
-    total, all_api_data = len(lista_pedidos_para_thorpe), []
-    
-    tempo_estimado_thorpe = int(total * 0.5)
-    
-    progress_bar = placeholder.progress(0, text=f"Consultando API Thorpe...")
-    
-    for i, pedido_id in enumerate(lista_pedidos_para_thorpe):
-        # MUDANÇA: Lógica do tempo restante
-        tempo_passado = int(i * 0.5)
-        tempo_restante = tempo_estimado_thorpe - tempo_passado
-        min_rest, seg_rest = divmod(tempo_restante, 60)
-        texto_tempo = f"(Tempo restante: {min_rest}m {seg_rest}s)"
+    total = len(lista_pedidos_para_thorpe)
+    all_api_data = []
 
-        dados = None
-        if token_ex: dados = consultar_pedido_thorpe(token_ex, API_PEDIDOS_BASE_URL_THORPE_EX, pedido_id, "EX")
-        if not dados and token_es: dados = consultar_pedido_thorpe(token_es, API_PEDIDOS_BASE_URL_THORPE_ES, pedido_id, "ES")
-        all_api_data.append(extrair_status_recente_thorpe_generico(dados, pedido_id))
-        
-        progress_bar.progress((i + 1) / total, text=f"Consulta Detalhada do Thorpe... {texto_tempo}")
-
-    progress_bar.progress(1.0, text="Consulta Detalhada do Thorpe Concluída!")
+    with placeholder:
+        with st.spinner(f"Consultando {total} pedidos na API Thorpe..."):
+            for i, pedido_id in enumerate(lista_pedidos_para_thorpe):
+                dados = None
+                if token_ex: dados = consultar_pedido_thorpe(token_ex, API_PEDIDOS_BASE_URL_THORPE_EX, pedido_id, "EX")
+                if not dados and token_es: dados = consultar_pedido_thorpe(token_es, API_PEDIDOS_BASE_URL_THORPE_ES, pedido_id, "ES")
+                all_api_data.append(extrair_status_recente_thorpe_generico(dados, pedido_id))
+    
+    log_message('info', 'Consulta na API Thorpe concluída.')
     return pd.DataFrame(all_api_data)
+
 
 def preparar_id_para_bd(pedido_id_excel):
     id_str = str(pedido_id_excel).replace('_CANC', '')
     return id_str[:-2] if len(id_str) == 11 and id_str.isnumeric() else id_str
 
 def buscar_dados_api(url, lista_ids, nome_api):
-    if not lista_ids: return pd.DataFrame()
+    if not lista_ids:
+        return pd.DataFrame()
+
     resultados = []
-    for pedido_id in lista_ids:
+    
+    def fetch_single(pedido_id, session):
         try:
-            response = requests.post(url, headers=API_CONTROLADORIA_HEADERS, json={"pedido": pedido_id}, timeout=20)
+            response = session.post(url, headers=API_CONTROLADORIA_HEADERS, json={"pedido": pedido_id}, timeout=20)
             response.raise_for_status()
-            dados = response.json()
-            if dados: resultados.extend(dados)
-            time.sleep(0.1)
+            return response.json()
         except requests.exceptions.RequestException as e:
             log_message('warning', f"Erro na API {nome_api} para o pedido {pedido_id}: {e}")
-            continue
-    log_message('info', f"(API {nome_api}) {len(resultados)} registros recebidos.")
+            return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        with requests.Session() as session:
+            future_to_pedido = {}
+            for pedido_id in lista_ids:
+                future = executor.submit(fetch_single, pedido_id, session)
+                future_to_pedido[future] = pedido_id
+                time.sleep(0.1) 
+
+            for future in concurrent.futures.as_completed(future_to_pedido):
+                dados = future.result()
+                if dados:
+                    resultados.extend(dados)
+
+    log_message('info', f"(API {nome_api}) {len(resultados)} registros recebidos de {len(lista_ids)} pedidos consultados.")
     return pd.DataFrame(resultados)
 
-# ... (funções de exportação permanecem inalteradas) ...
+
 @st.cache_data
 def gerar_excel_resumido(df_resumo, audit_map):
     df_export = df_resumo.copy()
@@ -156,9 +163,7 @@ def gerar_excel_detalhado(df_consolidado, df_crm, audit_map):
     return output.getvalue()
 
 
-# --- Interface e Lógica Principal ---
 st.title("Consulta Massiva de Pedidos Cancelados - Controladoria")
-# ... (código da barra lateral inalterado) ...
 st.sidebar.header("Configurações da Consulta")
 st.sidebar.subheader("1. Escolha seu arquivo Excel:")
 uploaded_file = st.sidebar.file_uploader("Escolha seu arquivo Excel:", type=["xlsx", "xls"], key="uploader", label_visibility="collapsed")
@@ -198,38 +203,18 @@ if process_button and uploaded_file and coluna_selecionada:
         if not df_base.empty:
             ids_limpos = df_base["ID_para_Consulta_API"].unique().tolist()
             
-            total_pedidos = st.session_state.total_pedidos_input
-            tempo_estimado_segundos = (total_pedidos * 5) + (total_pedidos * 0.5)
-            tempo_estimado_inteiro = int(tempo_estimado_segundos)
-            minutos, segundos = divmod(tempo_estimado_inteiro, 60)
-            st.info(f"Tempo estimado para a consulta de {total_pedidos} pedidos: aproximadamente {minutos} minuto(s) e {segundos} segundo(s).")
-            
-            placeholder_paralelo = st.empty()
-            placeholder_thorpe = st.empty()
+            df_detalhado = pd.DataFrame()
+            df_crm = pd.DataFrame()
 
-            # MUDANÇA: Lógica de barra de progresso com tempo restante
-            progress_bar = placeholder_paralelo.progress(0, text="Iniciando Consulta Detalhada dos Pedidos...")
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future_detalhado = executor.submit(buscar_dados_api, API_PEDIDO_DETALHADO_URL, ids_limpos, "Pedidos Detalhados")
-                future_crm = executor.submit(buscar_dados_api, API_CRM_URL, ids_limpos, "CRM")
-                
-                tempo_paralelo_estimado = int(total_pedidos * 5)
-                for i in range(tempo_paralelo_estimado):
-                    if future_detalhado.done() and future_crm.done():
-                        break
+            with st.spinner(f"Consultando detalhes para {len(ids_limpos)} pedidos. Por favor, aguarde..."):
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future_detalhado = executor.submit(buscar_dados_api, API_PEDIDO_DETALHADO_URL, ids_limpos, "Pedidos Detalhados")
+                    future_crm = executor.submit(buscar_dados_api, API_CRM_URL, ids_limpos, "CRM")
                     
-                    tempo_restante = tempo_paralelo_estimado - i
-                    min_rest, seg_rest = divmod(tempo_restante, 60)
-                    texto_tempo = f"(Tempo restante: {min_rest}m {seg_rest}s)"
-                    
-                    progress = (i + 1) / tempo_paralelo_estimado
-                    progress_bar.progress(progress, text=f"Consulta Detalhada dos Pedidos... {texto_tempo}")
-                    time.sleep(1)
-                
-                df_detalhado = future_detalhado.result()
-                df_crm = future_crm.result()
+                    df_detalhado = future_detalhado.result()
+                    df_crm = future_crm.result()
             
-            progress_bar.progress(1.0, text="Consulta Detalhada dos Pedidos Concluída!")
+            st.success("Consulta Concluída!")
 
             st.session_state.ids_nao_encontrados = list(set(ids_limpos) - set(df_detalhado['pedido_normalizado'].unique()))
             
@@ -241,8 +226,11 @@ if process_button and uploaded_file and coluna_selecionada:
                     return original_id if len(original_id) == 11 and original_id.isnumeric() else str(row['pedido_raw'])
                 df_detalhado['ID_para_Thorpe'] = df_detalhado.apply(decide_thorpe_id, axis=1)
                 
+                placeholder_thorpe = st.empty()
                 token_ex, token_es = obter_token_thorpe_ex_cached(), obter_token_thorpe_es_cached()
                 df_thorpe = buscar_dados_thorpe_combinado_api(df_detalhado['ID_para_Thorpe'].unique().tolist(), token_ex, token_es, placeholder_thorpe)
+                placeholder_thorpe.empty() 
+                
                 if not df_thorpe.empty:
                     df_detalhado = pd.merge(df_detalhado, df_thorpe, left_on='ID_para_Thorpe', right_on='pedido_raw_key', how='left').drop(columns=['pedido_raw_key', 'ID_para_Thorpe'])
                 
@@ -253,68 +241,118 @@ if process_button and uploaded_file and coluna_selecionada:
     except Exception as e:
         log_message('error', f"Ocorreu um erro geral no processamento: {e}"); import traceback; log_message('error', traceback.format_exc())
 
-# ... (Todo o restante do código de exibição, filtros e exportação permanece inalterado) ...
+# ===== INÍCIO DO BLOCO DE LÓGICA ALTERADO =====
 if st.session_state.dados_carregados or st.session_state.ids_nao_encontrados:
     df_display_raw = st.session_state.get('df_consolidado', pd.DataFrame())
     df_crm_raw = st.session_state.get('df_crm', pd.DataFrame())
 
     final_audit_map = {}
     if not df_display_raw.empty:
+        # --- Preparações Iniciais (sem alteração) ---
         df_display_raw['valor_normalizado'] = pd.to_numeric(df_display_raw['valor_normalizado'], errors='coerce').fillna(0)
         resumo_valores = df_display_raw.groupby('pedido_normalizado')['valor_normalizado'].sum()
         validacoes_por_pedido = df_display_raw.groupby('pedido_normalizado')['validacao_pedido'].unique().apply(set)
         pedidos_com_nota = validacoes_por_pedido[validacoes_por_pedido != {'Pedido'}].index
-        ids_caso1, ids_caso2, ids_caso3, ids_caso4, ids_caso5, ids_caso6 = [], [], [], [], [], []
+        
+        # --- Listas de IDs baseadas nos critérios ---
+        ids_caso1, ids_caso2, ids_caso3, ids_caso4, ids_caso5 = [], [], [], [], []
+        ids_cobranca_ativa, ids_carta_debito, ids_outras_tratativas = [], [], []
+
         if not df_crm_raw.empty:
             df_crm_raw['datahora_andamento'] = pd.to_datetime(df_crm_raw['datahora_andamento'], errors='coerce')
             pedidos_positivos = resumo_valores[resumo_valores > 0].index
+            
+            # Critério 1: Sem Tratativa (inalterado)
             pedidos_com_tratativa_real = df_crm_raw[df_crm_raw['andamento_descricao'] != 'EM EXPEDIÇÃO']['pedido_normalizado'].unique()
             ids_caso1 = [pid for pid in pedidos_positivos if pid not in pedidos_com_tratativa_real]
+            
+            # Critério 2: Cancelamento Pendente (inalterado)
             df_crm_recente_por_raw = df_crm_raw.sort_values('datahora_andamento', ascending=False).drop_duplicates('pedido_raw', keep='first')
             regex_cancelamento = re.compile(r'^LIB.*CANC', re.IGNORECASE)
             cancelamentos_pendentes_raw = df_crm_recente_por_raw[df_crm_recente_por_raw['andamento_obs'].str.contains(regex_cancelamento, na=False, regex=True)]
-            ids_caso2 = cancelamentos_pendentes_raw['pedido_normalizado'].unique()
+            ids_caso2 = cancelamentos_pendentes_raw['pedido_normalizado'].unique().tolist()
+            
+            # Critério 5: Finalizados (inalterado)
             df_crm_recente_por_norm = df_crm_raw.sort_values('datahora_andamento', ascending=False).drop_duplicates('pedido_normalizado', keep='first')
             pedidos_finalizados_crm = df_crm_recente_por_norm[df_crm_recente_por_norm['andamento_descricao'].str.startswith('FINAL', na=False)]['pedido_normalizado'].unique()
             ids_caso5 = list(set(pedidos_com_nota) & set(pedidos_finalizados_crm))
+
+            # --- NOVOS CRITÉRIOS ---
+            # Critério NOVO 1: Pedido com Cobrança Ativa
+            regex_cobranca = re.compile(r'JUR[ÍI]D|COBRAN[ÇC]|REVERSA.*?PAGAMENTO', re.IGNORECASE)
+            # Verifica em QUALQUER andamento, não apenas no último
+            pedidos_em_cobranca_crm = df_crm_raw[df_crm_raw['andamento_descricao'].str.contains(regex_cobranca, na=False)]['pedido_normalizado'].unique()
+            ids_cobranca_ativa = list(set(pedidos_positivos) & set(pedidos_em_cobranca_crm))
+
+            # Critério NOVO 2: Pedido com Carta de Débito
+            regex_carta_debito = re.compile(r'CARTA.*?D[ÉE]BITO', re.IGNORECASE)
+            pedidos_carta_debito_crm = df_crm_raw[df_crm_raw['andamento_descricao'].str.contains(regex_carta_debito, na=False)]['pedido_normalizado'].unique()
+            ids_carta_debito = list(set(pedidos_positivos) & set(pedidos_carta_debito_crm))
+            
+            # Critério ANTIGO 6 (agora "Outras Tratativas")
             pedidos_em_andamento = list(set(pedidos_com_tratativa_real) - set(pedidos_finalizados_crm))
-            ids_caso6 = list(set(pedidos_com_nota) & set(pedidos_em_andamento))
+            ids_tratativa_geral = list(set(pedidos_com_nota) & set(pedidos_em_andamento))
+            # Exclui os pedidos que já caíram nas novas categorias mais específicas
+            ids_outras_tratativas = list(set(ids_tratativa_geral) - set(ids_cobranca_ativa) - set(ids_carta_debito))
+
+        # Critério 3: Bloqueados sem Faturamento (inalterado)
         pedidos_so_com_pedido = validacoes_por_pedido[validacoes_por_pedido == {'Pedido'}].index
         pedidos_bloqueados_T = df_display_raw[df_display_raw['bloqueada'] == 'T']['pedido_normalizado'].unique()
         ids_caso3 = list(set(pedidos_so_com_pedido) & set(pedidos_bloqueados_T))
+        
+        # Critério 4: Devolvidos (inalterado)
         pedidos_valor_zero = resumo_valores[(resumo_valores > -1) & (resumo_valores < 1)].index
         ids_caso4 = list(set(pedidos_com_nota) & set(pedidos_valor_zero))
         
         priority_order = [
-            ('Pedidos com Cancelamento Pendente', ids_caso2), ('Pedidos Bloqueados sem Faturamento', ids_caso3),
-            ('Pedidos Devolvidos', ids_caso4), ('Pedidos Finalizados', ids_caso5),
-            ('Pedidos em Tratativa', ids_caso6), ('Pedidos sem Tratativa', ids_caso1)
+            ('Pedidos com Cancelamento Pendente', ids_caso2),
+            ('Pedidos Bloqueados sem Faturamento', ids_caso3),
+            ('Pedidos Devolvidos', ids_caso4),
+            ('Pedidos Finalizados', ids_caso5),
+            ('Pedido com Cobrança Ativa', ids_cobranca_ativa),      
+            ('Pedido com Carta de Débito', ids_carta_debito),      
+            ('Pedidos em Outras Tratativas', ids_outras_tratativas), 
+            ('Pedidos Pendentes de Tratativa', ids_caso1)
         ]
+        
         for pid in df_display_raw['pedido_normalizado'].unique():
             for name, id_list in priority_order:
                 if pid in id_list:
                     final_audit_map[pid] = name; break
             if pid not in final_audit_map: final_audit_map[pid] = 'OK'
+            
     counts = pd.Series(list(final_audit_map.values())).value_counts()
 
+    # --- ATUALIZAÇÃO DA EXIBIÇÃO DAS MÉTRICAS ---
     st.markdown(f"<h2 style='text-align: center;'>Visão Geral de {st.session_state.total_pedidos_input} Pedidos Computados</h2>", unsafe_allow_html=True)
+    
+    # Primeira Linha de Métricas
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric(label="Pedidos sem Tratativa", value=counts.get('Pedidos sem Tratativa', 0))
+    col1.metric(label="Pedidos Pendentes de Tratativa", value=counts.get('Pedidos Pendentes de Tratativa', 0))
     col2.metric(label="Cancelamento Pendente", value=counts.get('Pedidos com Cancelamento Pendente', 0))
     col3.metric(label="Pedidos Bloqueados sem Faturamento", value=counts.get('Pedidos Bloqueados sem Faturamento', 0))
     col4.metric(label="Pedidos Devolvidos", value=counts.get('Pedidos Devolvidos', 0))
-    col5, col6, col7, col8 = st.columns(4) 
-    col5.metric(label="Pedidos Finalizados", value=counts.get('Pedidos Finalizados', 0))
-    col6.metric(label="Pedidos em Tratativa", value=counts.get('Pedidos em Tratativa', 0))
-    col7.metric(label="Não Encontrados no Sysemp", value=len(st.session_state.ids_nao_encontrados))
-    with col8:
-        total_pedidos, sem_tratativa_count = st.session_state.total_pedidos_input, counts.get('Pedidos sem Tratativa', 0)
+
+    # Segunda Linha de Métricas (com as novas categorias)
+    col5, col6, col7, col8 = st.columns(4)
+    col5.metric(label="Pedido com Cobrança Ativa", value=counts.get('Pedido com Cobrança Ativa', 0))
+    col6.metric(label="Pedido com Carta de Débito", value=counts.get('Pedido com Carta de Débito', 0))
+    col7.metric(label="Pedidos em Outras Tratativas", value=counts.get('Pedidos em Outras Tratativas', 0))
+    col8.metric(label="Pedidos Finalizados", value=counts.get('Pedidos Finalizados', 0))
+
+    # Terceira Linha para os restantes
+    col9, col10, _ , _ = st.columns(4)
+    col9.metric(label="Não Encontrados no Sysemp", value=len(st.session_state.ids_nao_encontrados))
+    with col10:
+        total_pedidos, sem_tratativa_count = st.session_state.total_pedidos_input, counts.get('Pedidos Pendentes de Tratativa', 0)
         st.metric(label="Indicador de Controle", value=f"{(total_pedidos - sem_tratativa_count) / total_pedidos:.1%}" if total_pedidos > 0 else "N/A")
 
     st.markdown("---")
     st.subheader("Casos para Auditoria")
+    # Atualiza o dropdown com as novas categorias
     opcoes_auditoria = ['Todos'] + [name for name, _ in priority_order] + ['Pedidos não Encontrados na Base do Sysemp']
     filtro_auditoria = st.selectbox("Selecione um caso de auditoria:", options=opcoes_auditoria, label_visibility="collapsed")
+# ===== FIM DO BLOCO DE LÓGICA ALTERADO =====
 
     if filtro_auditoria == 'Pedidos não Encontrados na Base do Sysemp':
         st.markdown("---")
@@ -366,7 +404,7 @@ if st.session_state.dados_carregados or st.session_state.ids_nao_encontrados:
                     ordem_final = ['validacao_pedido', 'canal_venda', 'pedido_raw', 'filial', 'id_empresa', 'data_pedido','Data/Hora Emissão', 'valor_normalizado', 'uf_dest', 'transportadora','motivo_bloqueio', 'us_cadastro', 'tipo_nfe', 'nfe_cstat', 'data_expedicao','bloqueada', 'Status Thorpe', 'Data Status Thorpe']
                     detalhes_display = detalhes_pedido[[col for col in ordem_final if col in detalhes_pedido.columns]].fillna('---')
                     for col in ['data_pedido', 'data_expedicao']:
-                         if col in detalhes_display.columns: detalhes_display[col] = pd.to_datetime(detalhes_display[col], errors='coerce').dt.strftime('%d/%m/%Y')
+                        if col in detalhes_display.columns: detalhes_display[col] = pd.to_datetime(detalhes_display[col], errors='coerce').dt.strftime('%d/%m/%Y')
                     if 'Data Status Thorpe' in detalhes_display.columns: detalhes_display['Data Status Thorpe'] = pd.to_datetime(detalhes_display['Data Status Thorpe'], errors='coerce').dt.strftime('%d/%m/%Y %H:%M:%S')
                     st.dataframe(detalhes_display, use_container_width=True, hide_index=True)
                     
