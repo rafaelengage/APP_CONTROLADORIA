@@ -125,7 +125,7 @@ def buscar_dados_api(url, lista_ids, nome_api):
             for pedido_id in lista_ids:
                 future = executor.submit(fetch_single, pedido_id, session)
                 future_to_pedido[future] = pedido_id
-                time.sleep(0.1) 
+                ##time.sleep(0.1) 
 
             for future in concurrent.futures.as_completed(future_to_pedido):
                 dados = future.result()
